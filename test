@@ -1,0 +1,154 @@
+#include <SoftwareSerial.h>
+#include <TinyGPS++.h>
+
+const int TRIG_PIN = 5;
+const int ECHO_PIN = 6;
+const int BUZZER_PIN = 11;
+
+const int MAX_VALID_DISTANCE = 200;
+
+float duration_us, distance_cm;
+
+SoftwareSerial gpsSerial(4, 3);
+SoftwareSerial gsmSerial(7, 8);
+TinyGPSPlus gps;
+
+void gps_init() {
+  gpsSerial.begin(9600);
+}
+
+void gps_update() {
+  while (gpsSerial.available()) {
+    gps.encode(gpsSerial.read());
+  }
+}
+
+bool gps_locationValid() {
+  return gps.location.isValid();
+}
+
+double gps_lat() {
+  return gps.location.lat();
+}
+
+double gps_lng() {
+  return gps.location.lng();
+}
+
+// gsm
+
+void gsm_sendCommand(String cmd, unsigned long waitTime) {
+  gsmSerial.println(cmd);
+  delay(waitTime);
+}
+
+void gsm_init() {
+  gsmSerial.begin(9600);
+  delay(3000);   // wait for SIM800L boot
+  gsm_sendCommand("AT", 1000);
+  gsm_sendCommand("AT+CMGF=1", 1000);  // SMS text mode
+}
+
+void gsm_sendSMS(String number, String message) {
+  gsmSerial.print("AT+CMGS=\"");
+  gsmSerial.print(number);
+  gsmSerial.println("\"");
+  delay(1000);
+
+  gsmSerial.print(message);
+  delay(500);
+
+  gsmSerial.write(26);   // CTRL+Z
+  delay(5000);
+}
+
+// Tracker
+
+unsigned long lastSend = 0;
+const unsigned long sendInterval = 1800000;  // 1/2 hour
+
+void tracker_sendLocation() {
+
+  if (!gps_locationValid()) {
+    Serial.println("GPS not locked.");
+    return;
+  }
+
+  double lat = gps_lat();
+  double lng = gps_lng();
+
+  String message = "Location:\n";
+  message += "Lat: " + String(lat, 6) + "\n";
+  message += "Lng: " + String(lng, 6) + "\n";
+  message += "https://maps.google.com/?q=";
+  message += String(lat, 6) + "," + String(lng, 6);
+
+  gsm_sendSMS("+639XXXXXXXXX", message);
+
+  Serial.println("SMS Sent.");
+}
+
+
+void setup() {
+  Serial.begin(9600);
+  gps_init();
+  gsm_init();
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+}
+
+void loop() {
+  gps_update();
+  
+  // if (millis() - lastSend > sendInterval) {
+  //   tracker_sendLocation();
+  //   lastSend = millis();
+  // }
+
+  // Trigger ultrasonic pulse
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  duration_us = pulseIn(ECHO_PIN, HIGH, 30000); // timeout
+  distance_cm = duration_us * 0.017;
+
+  Serial.print("distance: ");
+  Serial.println(distance_cm);
+
+  // Ignore invalid readings
+  if (distance_cm <= 0 || distance_cm > MAX_VALID_DISTANCE) {
+    noTone(BUZZER_PIN); // silent
+    delay(100);
+    return;
+  }
+
+  // ZONE 1: Very close (0–30 cm) → continuous alarm
+  if (distance_cm <= 30) {
+    tone(BUZZER_PIN, 2000); // high pitch
+  }
+
+  // ZONE 2: Near (31–80 cm) → fast beeping
+  else if (distance_cm <= 80) {
+    tone(BUZZER_PIN, 1500);
+    delay(150);
+    noTone(BUZZER_PIN);
+    delay(150);
+  }
+
+  // ZONE 3: Medium (81–150 cm) → slow beeping
+  else if (distance_cm <= 150) {
+    tone(BUZZER_PIN, 1000);
+    delay(400);
+    noTone(BUZZER_PIN);
+    delay(1600);
+  }
+
+  // ZONE 4: Far (>150 cm) → silent
+  else {
+    noTone(BUZZER_PIN);
+    delay(100);
+  }
+}
+
